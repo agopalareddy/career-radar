@@ -25,6 +25,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 SEEN_PATH = ROOT / "data" / "seen.json"
+ERR_LOG = ROOT / "data" / "errors.log"
 
 SEEN_CAP = 3000  # remember this many post ids before dropping oldest
 PROFILE_CHAR_CAP = 24_000  # cap on CV + website text sent to the LLM
@@ -76,7 +77,10 @@ FORMAT RULES — follow this section structure EXACTLY on every run:
   resume's impact metrics by Friday."
 - NEVER add an "Action Items" section, checklist, numbered task list, or
   calendar. The sections above ARE the action items.
-- The Log section has one new dated line per run: "- YYYY-MM-DD: ..."
+- The Log section MUST have one new dated line per run, formatted as:
+  "- YYYY-MM-DD: N total posts (RR Reddit, HH Hacker News, DD Dev.to). [summary]"
+  The source counts (RR, HH, DD) are provided in the digest
+  under 'Source Summary' at the end of the digest.
 
 Their professional profile:
 
@@ -90,6 +94,10 @@ Below is the **current insights document** (from the previous daily run), follow
 by today's digest of new posts from career communities (Reddit, Hacker News,
 Dev.to). Do NOT treat the current document as a blank template — it already
 contains personalized advice from prior days. Your job is to evolve it.
+
+The digest ends with per-source post counts in a '## Source Summary' section.
+Use those numbers in the Log entry (format specified in system prompt).
+Do NOT keep the Source Summary section in your output — it is metadata only.
 
 Rewrite the ENTIRE insights document. Rules:
 - Fold relevant new findings into existing sections (job-search trends,
@@ -121,6 +129,18 @@ _Maintained automatically by career-radar._
 
 ## Log
 """
+
+
+# ---------- helpers ----------
+
+
+def log_error(source: str, detail: str) -> None:
+    ts = datetime.datetime.now().isoformat()
+    try:
+        with open(ERR_LOG, "a") as f:
+            f.write(f"{ts} | {source} | {detail}\n")
+    except OSError:
+        pass
 
 
 # ---------- config / env ----------
@@ -488,15 +508,19 @@ def main() -> None:
     except (json.JSONDecodeError, OSError):
         seen = []
     new_posts: list[dict] = []
+    reddit_n = hn_n = devto_n = 0
 
     # ── Reddit RSS ──
     for sub in cfg.get("reddit_subreddits", []):
         try:
             posts = filter_new_posts(fetch_reddit_rss(sub, cfg), seen)
             new_posts.extend(posts)
+            reddit_n += len(posts)
             print(f"r/{sub}: {len(posts)} new posts")
         except Exception as e:
-            print(f"warning: r/{sub} failed: {e}", file=sys.stderr)
+            msg = f"r/{sub}: {e}"
+            print(f"warning: {msg}", file=sys.stderr)
+            log_error(f"reddit-rss:{sub}", msg)
 
     # ── HN Algolia ──
     hn_top = cfg.get("hn_top_for_comments", 3)
@@ -511,10 +535,14 @@ def main() -> None:
                         f"warning: HN comments for {post['id']} failed: {e}",
                         file=sys.stderr,
                     )
+                    log_error(f"hn-comments:{post['id']}", str(e))
             new_posts.extend(posts)
+            hn_n += len(posts)
             print(f"HN '{query[:40]}': {len(posts)} new posts")
         except Exception as e:
-            print(f"warning: HN query failed: {e}", file=sys.stderr)
+            msg = f"HN query '{query[:40]}': {e}"
+            print(f"warning: {msg}", file=sys.stderr)
+            log_error("hn-algolia", msg)
 
     # ── Dev.to ──
     dv_top = cfg.get("devto_top_for_comments", 2)
@@ -529,17 +557,30 @@ def main() -> None:
                         f"warning: dev.to comments for {post['id']} failed: {e}",
                         file=sys.stderr,
                     )
+                    log_error(f"devto-comments:{post['id']}", str(e))
             new_posts.extend(posts)
+            devto_n += len(posts)
             print(f"dev.to/{tag}: {len(posts)} new posts")
         except Exception as e:
-            print(f"warning: dev.to/{tag} failed: {e}", file=sys.stderr)
+            msg = f"dev.to/{tag}: {e}"
+            print(f"warning: {msg}", file=sys.stderr)
+            log_error("devto-forem", msg)
 
+    total_n = reddit_n + hn_n + devto_n
     if not new_posts:
         print("no new posts today; nothing to do")
         return
 
     digest = build_digest(new_posts)
-    print(f"collected {len(new_posts)} new posts total")
+    digest += (
+        f"\n\n<!-- Source Summary for Log -->\n"
+        f"## Source Summary\n"
+        f"- Reddit: {reddit_n} new posts\n"
+        f"- Hacker News: {hn_n} new posts\n"
+        f"- Dev.to: {devto_n} new posts\n"
+        f"- Total: {total_n} new posts\n"
+    )
+    print(f"collected {total_n} new posts total")
 
     if args.dry_run:
         print(digest)

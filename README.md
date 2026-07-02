@@ -155,7 +155,10 @@ and full self-text but does not include comment data.
 5. **Synthesize** — Send the full digest + profile + previous INSIGHTS.md to
    OpenRouter. The LLM rewrites the entire document — merging new findings,
    updating stale sections, and logging changes.
-6. **Save** — Write updated `data/INSIGHTS.md` and `data/seen.json`.
+6. **Log** — Source post counts recorded in the Log entry (e.g. "40 Reddit,
+   75 Hacker News, 25 Dev.to"). Errors from any source persisted to
+   `data/errors.log` for debugging.
+7. **Save** — Write updated `data/INSIGHTS.md` and `data/seen.json`.
 
 ## Files
 
@@ -166,7 +169,7 @@ and full self-text but does not include comment data.
 | `.env.example`         | ✅            | Env template                       |
 | `test_career_radar.py` | ✅            | 4 offline self-checks              |
 | `config.toml` / `.env` | ❌ gitignored | Your personalization               |
-| `data/`                | ❌ gitignored | INSIGHTS.md, seen.json, logs       |
+| `data/`                | ❌ gitignored | INSIGHTS.md, seen.json, errors.log  |
 
 ## Contributing
 
