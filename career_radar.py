@@ -16,28 +16,51 @@ import argparse
 import datetime
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 import tomllib
+import urllib.parse
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
-API_BASE = "https://oauth.reddit.com"
 SEEN_PATH = ROOT / "data" / "seen.json"
 
-SEEN_CAP = 3000            # remember this many post ids before dropping oldest
+SEEN_CAP = 3000  # remember this many post ids before dropping oldest
 PROFILE_CHAR_CAP = 24_000  # cap on CV + website text sent to the LLM
 DIGEST_CHAR_CAP = 100_000  # cap on the reddit digest sent to the LLM
-POST_TEXT_CAP = 1500       # chars of selftext kept per post
-COMMENT_TEXT_CAP = 800     # chars kept per comment
+POST_TEXT_CAP = 1500  # chars of selftext kept per post
+COMMENT_TEXT_CAP = 800  # chars kept per comment
 
 SYSTEM_PROMPT = """\
-You are a sharp, practical career advisor. You maintain a living markdown
-document of career insights for ONE specific person. Everything you write
-must be actionable and tailored to their background, seniority, and field —
-generic advice is noise. Their professional profile:
+You are an expert career coach and technical recruiter. You maintain a living
+markdown document of career insights for ONE specific person. Your job is to
+read their profile, then read today's digest of career-related posts from
+Reddit/HN/Dev.to, and produce a SHARP, ACTIONABLE, PERSONALIZED document.
+
+Rules that govern every response:
+- Everything you write must reference specifics from their profile — past
+  roles, technologies they know, their degree, their seniority. Generic
+  advice ("network more", "tailor your resume") is banned. Replace it with
+  "Your Crittero internship taught you recommendation systems; emphasize that
+  when applying to personalization teams at Spotify or Netflix."
+- Each section must contain at least one concrete, measurable action they can
+  take THIS WEEK. No "consider doing X" — write "Do X by Friday."
+- You are seeing raw, unfiltered posts from job seekers. Extract the
+  PATTERNS behind the anecdotes: what are hiring managers actually looking
+  for, what ATS systems are filtering on, what interview formats are
+  changing. The individual posts are just data points — your job is to find
+  the signal.
+- Write at length. The document should be 300-600 lines. Do not truncate.
+  Do not summarize. Go deep. Each section should have 4-8 substantive
+  bullet points with explanations, not one-liners.
+- Use their name. Address them directly. "Aadarsha, here's what you need to
+  change in your resume this week." Not generic third-person.
+- The document should feel like a senior mentor wrote it after spending an
+  hour studying their career and reading today's job market news.
+
+Their professional profile:
 
 <profile>
 {profile}
@@ -45,20 +68,23 @@ generic advice is noise. Their professional profile:
 """
 
 USER_PROMPT = """\
-Below is the current insights document, then today's digest of new posts from
-career-related subreddits.
+Below is the **current insights document** (from the previous daily run), followed
+by today's digest of new posts from career communities (Reddit, Hacker News,
+Dev.to). Do NOT treat the current document as a blank template — it already
+contains personalized advice from prior days. Your job is to evolve it.
 
 Rewrite the ENTIRE insights document. Rules:
 - Fold relevant new findings into existing sections (job-search trends,
   CV/resume advice, interview strategies, negotiation/market signals).
   Merge and update — do not just append. Remove items that went stale.
+  Preserve any section that still applies; only rewrite what needs updating.
 - Only include digest items relevant to this person's field and level;
   silently drop the rest.
 - Make advice concrete: what to change in the CV, what to practice, what to
   watch in the market — not platitudes.
 - Keep a "## Log" section at the bottom; add one dated line ({today})
   summarizing what changed today.
-- Keep the whole document under ~400 lines.
+- Keep the whole document under ~600 lines.
 - Output ONLY the markdown document. No preamble, no code fences around it.
 
 <current_document>
@@ -80,6 +106,7 @@ _Maintained automatically by career-radar._
 
 
 # ---------- config / env ----------
+
 
 def load_env(path: Path) -> None:
     """Minimal .env loader; real environment always wins."""
@@ -107,70 +134,194 @@ def require_env(*keys: str) -> None:
         sys.exit(f"missing required env vars: {', '.join(missing)} (see .env.example)")
 
 
-# ---------- reddit ----------
+# ---------- reddit RSS (posts only, no auth needed) ----------
 
-def reddit_session(user_agent: str):
-    import requests  # ponytail: lazy import keeps pure helpers testable without deps
-
-    resp = requests.post(
-        TOKEN_URL,
-        auth=(os.environ["REDDIT_CLIENT_ID"], os.environ["REDDIT_CLIENT_SECRET"]),
-        data={"grant_type": "client_credentials"},
-        headers={"User-Agent": user_agent},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    token = resp.json()["access_token"]
-    session = requests.Session()
-    session.headers.update({"Authorization": f"bearer {token}", "User-Agent": user_agent})
-    return session
+REDDIT_RSS_NS = "http://www.w3.org/2005/Atom"
+REDDIT_AGENT = "career-radar/1.0 (RSS reader)"
+REDDIT_RSS_CAP = 120  # max seconds to wait on rate-limit
 
 
-def get_json(session, path: str, delay: float, **params):
-    # ponytail: fixed delay keeps us far below the free tier's 100 requests/min;
-    # switch to X-Ratelimit-Remaining header parsing if you ever need more throughput
-    time.sleep(delay)
-    resp = session.get(f"{API_BASE}{path}", params=params, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
+def _html_to_text(html: str | None) -> str:
+    """Strip HTML tags and common entities from Reddit RSS content."""
+    if not html:
+        return ""
+    text = re.sub(r"<!--.*?-->", "", html, flags=re.DOTALL)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"&(amp|lt|gt|quot|#\d+);", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    # Strip Reddit RSS footer: "submitted by /u/... [link] [comments]"
+    text = re.sub(r"\s*submitted by\s+/u/\S+.*$", "", text)
+    return text
 
 
-def fetch_posts(session, subreddit: str, cfg: dict) -> list[dict]:
-    data = get_json(
-        session, f"/r/{subreddit}/top", cfg["request_delay_seconds"],
-        t=cfg["timeframe"], limit=cfg["posts_per_subreddit"],
-    )
+def _reddit_rss_get(url: str, delay: float) -> tuple[int, str]:
+    """GET with rate-limit handling. Returns (http_status, body)."""
+    import requests
+
+    # ponytail: simple retry loop with backoff; 1 req/60s is the observed limit
+    waited = 0.0
+    while True:
+        resp = requests.get(url, headers={"User-Agent": REDDIT_AGENT}, timeout=30)
+        if resp.status_code == 429:
+            retry = resp.headers.get("x-ratelimit-reset", "60")
+            try:
+                wait = min(float(retry) + 2, REDDIT_RSS_CAP - waited)
+            except ValueError:
+                wait = 60
+            if waited + wait >= REDDIT_RSS_CAP:
+                return 429, ""
+            time.sleep(wait)
+            waited += wait
+            continue
+        if resp.status_code != 200:
+            return resp.status_code, ""
+        # success — respect delay for next call
+        time.sleep(delay)
+        return 200, resp.text
+
+
+def fetch_reddit_rss(subreddit: str, cfg: dict) -> list[dict]:
+    import xml.etree.ElementTree as ET
+
+    url = f"https://www.reddit.com/r/{subreddit}/top.rss?t=day"
+    status, body = _reddit_rss_get(url, cfg.get("reddit_rss_delay", 10))
+    if status != 200 or not body:
+        return []
+
+    root = ET.fromstring(body)
     posts = []
-    for child in data["data"]["children"]:
-        d = child["data"]
-        posts.append({
-            "id": d["id"],
-            "subreddit": subreddit,
-            "title": d.get("title", ""),
-            "selftext": (d.get("selftext") or "")[:POST_TEXT_CAP],
-            "score": d.get("score", 0),
-            "num_comments": d.get("num_comments", 0),
-        })
+    for entry in root.findall(f"{{{REDDIT_RSS_NS}}}entry"):
+        eid = entry.find(f"{{{REDDIT_RSS_NS}}}id")
+        title_el = entry.find(f"{{{REDDIT_RSS_NS}}}title")
+        content_el = entry.find(f"{{{REDDIT_RSS_NS}}}content")
+        post_id = eid.text.removeprefix("t3_") if eid is not None and eid.text else ""
+        title = title_el.text if title_el is not None else ""
+        raw_body = content_el.text if content_el is not None else ""
+        selftext = _html_to_text(raw_body)[:POST_TEXT_CAP]
+        if post_id and title:
+            posts.append(
+                {
+                    "id": f"reddit:{post_id}",
+                    "source": f"r/{subreddit}",
+                    "title": title,
+                    "selftext": selftext,
+                    "score": 0,
+                    "num_comments": 0,
+                    "comments": [],
+                }
+            )
+        if len(posts) >= cfg.get("reddit_posts_per_sub", 10):
+            break
     return posts
 
 
-def fetch_top_comments(session, post: dict, cfg: dict) -> list[str]:
-    data = get_json(
-        session, f"/r/{post['subreddit']}/comments/{post['id']}",
-        cfg["request_delay_seconds"], limit=cfg["comments_per_post"] + 2,
-        depth=1, sort="top",
-    )
+# ---------- HN Algolia ----------
+
+
+def fetch_hn_posts(query: str, cfg: dict) -> list[dict]:
+    import requests
+
+    hits = cfg.get("hn_hits_per_query", 10)
+    url = f"https://hn.algolia.com/api/v1/search?query={urllib.parse.quote(query)}&tags=story&hitsPerPage={hits}"
+    resp = requests.get(url, headers={"User-Agent": REDDIT_AGENT}, timeout=15)
+    if resp.status_code != 200:
+        return []
+    posts = []
+    for h in resp.json().get("hits", []):
+        posts.append(
+            {
+                "id": f"hn:{h['objectID']}",
+                "source": "hn",
+                "title": h.get("title", ""),
+                "selftext": "",
+                "score": h.get("points", 0),
+                "num_comments": h.get("num_comments", 0),
+                "comments": [],
+                "_objectID": h["objectID"],  # transient, stripped in build_digest
+            }
+        )
+    return posts
+
+
+def fetch_hn_comments(post: dict, cfg: dict) -> list[str]:
+    import requests
+
+    oid = post.get("_objectID")
+    if not oid:
+        return []
+    maxc = cfg.get("hn_comments_per_post", 3)
+    resp = requests.get(f"https://hn.algolia.com/api/v1/items/{oid}", timeout=15)
+    if resp.status_code != 200:
+        return []
+
+    def _walk(node, depth=0):
+        if depth > 1:
+            return
+        text = (node.get("text") or "").strip()
+        if text and depth == 0:
+            comments.append(text[:COMMENT_TEXT_CAP])
+        for child in node.get("children", []):
+            if len(comments) < maxc:
+                _walk(child, depth + 1)
+
+    comments: list[str] = []
+    _walk(resp.json())
+    return comments
+
+
+# ---------- Dev.to ----------
+
+
+def fetch_devto_posts(tag: str, cfg: dict) -> list[dict]:
+    import requests
+
+    per_page = cfg.get("devto_articles_per_tag", 5)
+    url = f"https://dev.to/api/articles?tag={urllib.parse.quote(tag)}&per_page={per_page}&top=1"
+    resp = requests.get(url, headers={"User-Agent": REDDIT_AGENT}, timeout=15)
+    if resp.status_code != 200:
+        return []
+    posts = []
+    for a in resp.json():
+        desc = (a.get("description") or "").strip()
+        posts.append(
+            {
+                "id": f"devto:{a['id']}",
+                "source": f"dev.to/{tag}",
+                "title": a.get("title", ""),
+                "selftext": desc[:POST_TEXT_CAP],
+                "score": a.get("positive_reactions_count", 0),
+                "num_comments": a.get("comments_count", 0),
+                "comments": [],
+                "_article_id": a["id"],  # transient
+            }
+        )
+        if len(posts) >= per_page:
+            break
+    return posts
+
+
+def fetch_devto_comments(post: dict, cfg: dict) -> list[str]:
+    import requests
+
+    aid = post.get("_article_id")
+    if not aid:
+        return []
+    maxc = cfg.get("devto_comments_per_post", 3)
+    resp = requests.get(f"https://dev.to/api/comments?a_id={aid}", timeout=15)
+    if resp.status_code != 200:
+        return []
     comments = []
-    for child in data[1]["data"]["children"]:
-        body = child.get("data", {}).get("body")
+    for c in resp.json():
+        body = (c.get("body_html") or "").strip()
         if body:
-            comments.append(body[:COMMENT_TEXT_CAP])
-        if len(comments) >= cfg["comments_per_post"]:
+            comments.append(_html_to_text(body)[:COMMENT_TEXT_CAP])
+        if len(comments) >= maxc:
             break
     return comments
 
 
 # ---------- pure helpers (tested) ----------
+
 
 def filter_new_posts(posts: list[dict], seen: list[str]) -> list[dict]:
     seen_set = set(seen)
@@ -180,8 +331,10 @@ def filter_new_posts(posts: list[dict], seen: list[str]) -> list[dict]:
 def build_digest(posts: list[dict]) -> str:
     lines = []
     for p in posts:
-        lines.append(f"### [r/{p['subreddit']}] {p['title']} "
-                     f"({p['score']} pts, {p['num_comments']} comments)")
+        src = p.get("source", "unknown")
+        lines.append(
+            f"### [{src}] {p['title']} ({p['score']} pts, {p['num_comments']} comments)"
+        )
         if p.get("selftext"):
             lines.append(p["selftext"])
         for c in p.get("comments", []):
@@ -196,45 +349,85 @@ def update_seen(seen: list[str], new_posts: list[dict]) -> list[str]:
 
 # ---------- profile grounding ----------
 
+
 def extract_text(path: Path) -> str:
     if path.suffix.lower() == ".pdf":
         try:
             return subprocess.run(
                 ["pdftotext", str(path), "-"],
-                capture_output=True, text=True, check=True,
+                capture_output=True,
+                text=True,
+                check=True,
             ).stdout
         except (FileNotFoundError, subprocess.CalledProcessError):
-            print(f"warning: could not extract {path} (install poppler-utils, "
-                  "or point CV_PATH at a .md/.txt export)", file=sys.stderr)
+            print(
+                f"warning: could not extract {path} (install poppler-utils, "
+                "or point CV_PATH at a .md/.txt export)",
+                file=sys.stderr,
+            )
             return ""
     return path.read_text(errors="ignore")
 
 
-def gather_profile() -> str:
-    parts = []
-    cv = os.environ.get("CV_PATH", "")
-    if cv and Path(cv).exists():
-        parts.append("## CV\n" + extract_text(Path(cv)))
+def gather_profile() -> tuple[str, list[Path]]:
+    parts: list[str] = []
+    pdf_paths: list[Path] = []
+    for cv_raw in os.environ.get("CV_PATH", "").split(","):
+        cv_path = Path(cv_raw.strip())
+        if cv_raw.strip() and cv_path.exists() and cv_path.is_file():
+            if cv_path.suffix.lower() == ".pdf":
+                pdf_paths.append(cv_path)
+            else:
+                label = "## Resume" if "resume" in cv_path.name.lower() else "## CV"
+                parts.append(f"{label}\n" + extract_text(cv_path))
     site = os.environ.get("WEBSITE_DIR", "")
     if site and Path(site).is_dir():
         for f in sorted(Path(site).rglob("*")):
-            if f.is_file() and f.suffix.lower() in {".md", ".txt", ".html"}:
+            if f.is_file() and f.suffix.lower() in {".md", ".txt", ".html", ".tex"}:
                 parts.append(f"## website: {f.name}\n" + f.read_text(errors="ignore"))
     profile = "\n\n".join(parts).strip()
-    if not profile:
-        print("warning: no profile found (CV_PATH / WEBSITE_DIR unset or empty); "
-              "insights will be generic", file=sys.stderr)
+    if not profile and not pdf_paths:
+        print(
+            "warning: no profile found (CV_PATH / WEBSITE_DIR unset or empty); "
+            "insights will be generic",
+            file=sys.stderr,
+        )
         profile = "(no profile provided)"
-    return profile[:PROFILE_CHAR_CAP]
+    return profile[:PROFILE_CHAR_CAP], pdf_paths
 
 
 # ---------- synthesis ----------
 
-def synthesize(cfg: dict, profile: str, digest: str, current: str) -> str:
-    import requests  # lazy import, see reddit_session
+
+def synthesize(
+    cfg: dict, profile: str, pdf_paths: list[Path], digest: str, current: str
+) -> str:
+    import base64 as _base64
+    import requests as _requests
 
     today = datetime.date.today().isoformat()
-    resp = requests.post(
+    user_content: list[dict] = [
+        {
+            "type": "text",
+            "text": USER_PROMPT.format(current=current, digest=digest, today=today),
+        }
+    ]
+    for pdf_path in pdf_paths:
+        try:
+            with open(pdf_path, "rb") as f:
+                b64 = _base64.b64encode(f.read()).decode()
+        except OSError as e:
+            print(f"warning: could not read {pdf_path}: {e}", file=sys.stderr)
+            continue
+        user_content.append(
+            {
+                "type": "file",
+                "file": {"file_data": f"data:application/pdf;base64,{b64}"},
+            }
+        )
+        print(f"embedded {pdf_path.name} ({len(b64) // 1024} KB base64)")
+
+    resp = _requests.post(
         "https://openrouter.ai/api/v1/chat/completions",
         headers={"Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}"},
         json={
@@ -242,8 +435,7 @@ def synthesize(cfg: dict, profile: str, digest: str, current: str) -> str:
             "max_tokens": cfg["max_output_tokens"],
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT.format(profile=profile)},
-                {"role": "user",
-                 "content": USER_PROMPT.format(current=current, digest=digest, today=today)},
+                {"role": "user", "content": user_content},
             ],
         },
         timeout=300,
@@ -251,48 +443,86 @@ def synthesize(cfg: dict, profile: str, digest: str, current: str) -> str:
     resp.raise_for_status()
     text = resp.json()["choices"][0]["message"]["content"].strip()
     if len(text) < 100:
-        sys.exit(f"model returned suspiciously short output; not overwriting insights:\n{text}")
+        sys.exit(
+            f"model returned suspiciously short output; not overwriting insights:\n{text}"
+        )
     return text + "\n"
 
 
 # ---------- main ----------
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dry-run", action="store_true",
-                        help="fetch and print the digest, skip the LLM call")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="fetch and print the digest, skip the LLM call",
+    )
     args = parser.parse_args()
 
     load_env(ROOT / ".env")
     cfg = load_config()
-    require_env("REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET")
     if not args.dry_run:
         require_env("OPENROUTER_API_KEY")
 
-    seen = json.loads(SEEN_PATH.read_text()) if SEEN_PATH.exists() else []
-    user_agent = os.environ.get("REDDIT_USER_AGENT", "career-radar/1.0")
-    session = reddit_session(user_agent)
-
+    try:
+        seen = json.loads(SEEN_PATH.read_text()) if SEEN_PATH.exists() else []
+    except (json.JSONDecodeError, OSError):
+        seen = []
     new_posts: list[dict] = []
-    for sub in cfg["subreddits"]:
+
+    # ── Reddit RSS ──
+    for sub in cfg.get("reddit_subreddits", []):
         try:
-            posts = filter_new_posts(fetch_posts(session, sub, cfg), seen)
-        except Exception as e:  # one bad subreddit shouldn't kill the run
+            posts = filter_new_posts(fetch_reddit_rss(sub, cfg), seen)
+            new_posts.extend(posts)
+            print(f"r/{sub}: {len(posts)} new posts")
+        except Exception as e:
             print(f"warning: r/{sub} failed: {e}", file=sys.stderr)
-            continue
-        for post in posts[:cfg["top_posts_with_comments"]]:
-            try:
-                post["comments"] = fetch_top_comments(session, post, cfg)
-            except Exception as e:
-                print(f"warning: comments for {post['id']} failed: {e}", file=sys.stderr)
-        new_posts.extend(posts)
+
+    # ── HN Algolia ──
+    hn_top = cfg.get("hn_top_for_comments", 3)
+    for query in cfg.get("hn_queries", []):
+        try:
+            posts = filter_new_posts(fetch_hn_posts(query, cfg), seen)
+            for post in posts[:hn_top]:
+                try:
+                    post["comments"] = fetch_hn_comments(post, cfg)
+                except Exception as e:
+                    print(
+                        f"warning: HN comments for {post['id']} failed: {e}",
+                        file=sys.stderr,
+                    )
+            new_posts.extend(posts)
+            print(f"HN '{query[:40]}': {len(posts)} new posts")
+        except Exception as e:
+            print(f"warning: HN query failed: {e}", file=sys.stderr)
+
+    # ── Dev.to ──
+    dv_top = cfg.get("devto_top_for_comments", 2)
+    for tag in cfg.get("devto_tags", []):
+        try:
+            posts = filter_new_posts(fetch_devto_posts(tag, cfg), seen)
+            for post in posts[:dv_top]:
+                try:
+                    post["comments"] = fetch_devto_comments(post, cfg)
+                except Exception as e:
+                    print(
+                        f"warning: dev.to comments for {post['id']} failed: {e}",
+                        file=sys.stderr,
+                    )
+            new_posts.extend(posts)
+            print(f"dev.to/{tag}: {len(posts)} new posts")
+        except Exception as e:
+            print(f"warning: dev.to/{tag} failed: {e}", file=sys.stderr)
 
     if not new_posts:
         print("no new posts today; nothing to do")
         return
 
     digest = build_digest(new_posts)
-    print(f"collected {len(new_posts)} new posts from {len(cfg['subreddits'])} subreddits")
+    print(f"collected {len(new_posts)} new posts total")
 
     if args.dry_run:
         print(digest)
@@ -300,7 +530,8 @@ def main() -> None:
 
     insights_path = ROOT / cfg["insights_path"]
     current = insights_path.read_text() if insights_path.exists() else INSIGHTS_TEMPLATE
-    updated = synthesize(cfg, gather_profile(), digest, current)
+    profile, pdf_paths = gather_profile()
+    updated = synthesize(cfg, profile, pdf_paths, digest, current)
 
     insights_path.parent.mkdir(parents=True, exist_ok=True)
     insights_path.write_text(updated)

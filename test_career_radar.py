@@ -4,13 +4,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from career_radar import (
-    build_digest,
-    filter_new_posts,
-    load_env,
-    update_seen,
-    SEEN_CAP,
-)
+from career_radar import SEEN_CAP, build_digest, filter_new_posts, load_env, update_seen
 
 
 def test_filter_new_posts():
@@ -28,11 +22,17 @@ def test_update_seen_caps():
 
 
 def test_build_digest():
-    posts = [{
-        "id": "x", "subreddit": "resumes", "title": "One-page rule?",
-        "selftext": "Is it still a thing", "score": 42, "num_comments": 7,
-        "comments": ["Yes, unless 10+ YOE"],
-    }]
+    posts = [
+        {
+            "id": "x",
+            "source": "r/resumes",
+            "title": "One-page rule?",
+            "selftext": "Is it still a thing",
+            "score": 42,
+            "num_comments": 7,
+            "comments": ["Yes, unless 10+ YOE"],
+        }
+    ]
     digest = build_digest(posts)
     assert "[r/resumes] One-page rule? (42 pts, 7 comments)" in digest
     assert "Is it still a thing" in digest
