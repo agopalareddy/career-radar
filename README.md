@@ -8,20 +8,20 @@ resume and CV, and has an LLM rewrite a living markdown document of
 actionable career insights tailored specifically to you.
 
 ```
-┌──────────────────┐
-│ Reddit RSS (4 subs)  │──┐
+┌───────────────────────┐
+│ Reddit RSS (4 subs)   │──┐
 │ HN Algolia (3 queries)│──┤
 │ Dev.to (5 tags)       │──┤
-└──────────────────┘   │
-                       ▼
-              ┌────────────────┐      ┌─────────────┐
-              │ career_radar.py │─────▶│ OpenRouter   │
-              └────────────────┘      │ (DeepSeek)   │
-                       ▲               └──────┬──────┘
-         .env / config.toml                   │
-         Resume + CV (local PDFs)             ▼
-                                   data/INSIGHTS.md
-                                   (updated daily)
+└───────────────────────┘  │
+                           ▼
+                  ┌─────────────────┐       ┌─────────────┐
+                  │ career_radar.py │─────▶ │ OpenRouter  │
+                  └─────────────────┘       │ (DeepSeek)  │
+                       ▲                    └──────┬──────┘
+             .env / config.toml                    │
+           Resume + CV (local PDFs)                ▼
+                                           data/INSIGHTS.md
+                                             (updated daily)
 ```
 
 All personalization (API keys, resume/CV paths) lives in gitignored files.
