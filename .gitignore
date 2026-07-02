@@ -1,0 +1,14 @@
+# personal / secret — never committed
+.env
+config.toml
+
+# generated output and state
+data/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+
+# local tooling
+.claude/

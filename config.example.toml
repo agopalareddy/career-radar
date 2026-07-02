@@ -1,0 +1,35 @@
+# Copy to config.toml and edit. config.toml is gitignored — safe to personalize.
+
+# Anthropic model for synthesis. claude-haiku-4-5 is the budget pick
+# ($1/$5 per million tokens; a typical daily run costs a few cents).
+# Swap for "claude-sonnet-5" or "claude-opus-4-8" if you want deeper analysis.
+model = "claude-haiku-4-5"
+max_output_tokens = 8192
+
+# Where the living insights document is written (gitignored by default).
+insights_path = "data/INSIGHTS.md"
+
+# Subreddits to scan. Tailor to your field — e.g. add r/datascience,
+# r/ExperiencedDevs, r/UXDesign, ...
+subreddits = [
+  "jobs",
+  "careerguidance",
+  "resumes",
+  "EngineeringResumes",
+  "cscareerquestions",
+  "interviews",
+  "negotiation",
+  "GetEmployed",
+]
+
+# "day" for a daily run; "week" if you schedule weekly.
+timeframe = "day"
+
+# Request budget: 1 token request + 1 listing per subreddit
+# + top_posts_with_comments comment fetches per subreddit.
+# Defaults: 1 + 8 + 24 = 33 requests/run — far below Reddit's
+# free-tier limit of 100 requests/minute (10k/day guideline).
+posts_per_subreddit = 10
+top_posts_with_comments = 3
+comments_per_post = 2
+request_delay_seconds = 1.0
