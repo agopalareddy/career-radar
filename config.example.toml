@@ -23,12 +23,26 @@ reddit_posts_per_sub = 10
 reddit_rss_delay = 10 # seconds between subreddit calls
 
 # ── Hacker News (HN Algolia, no auth) ──
+# Single-keyword queries — HN Algolia OR returns zero results for multi-word OR.
+# Each query searched independently via /search_by_date for recency.
 hn_queries = [
-  "resume OR CV OR cover letter OR career advice",
-  "job search OR interview OR hiring OR layoffs",
-  "salary negotiation OR compensation OR raise OR offer",
+  "resume",
+  "career",
+  "interview",
+  "hiring",
+  "salary",
+  "negotiation",
+  "job search",
+  "offer",
+  "layoff",
+  "networking",
+  "recruiter",
+  "compensation",
+  "cover letter",
+  "career advice",
+  "job market",
 ]
-hn_hits_per_query = 10
+hn_hits_per_query = 5
 hn_top_for_comments = 3 # fetch comments for top N hits per query
 hn_comments_per_post = 3
 

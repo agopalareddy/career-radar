@@ -7,21 +7,21 @@ Reddit, Hacker News, and Dev.to, grounds them against your locally-stored
 resume and CV, and has an LLM rewrite a living markdown document of
 actionable career insights tailored specifically to you.
 
-```
-┌───────────────────────┐
-│ Reddit RSS (4 subs)   │──┐
-│ HN Algolia (3 queries)│──┤
-│ Dev.to (5 tags)       │──┤
-└───────────────────────┘  │
-                           ▼
-                  ┌─────────────────┐       ┌─────────────┐
-                  │ career_radar.py │─────▶ │ OpenRouter  │
-                  └─────────────────┘       │ (DeepSeek)  │
-                       ▲                    └──────┬──────┘
-             .env / config.toml                    │
-           Resume + CV (local PDFs)                ▼
-                                           data/INSIGHTS.md
-                                             (updated daily)
+```mermaid
+flowchart TD
+    A[Reddit RSS<br/>4 subreddits] --> D[career_radar.py]
+    B[HN Algolia<br/>15 keywords] --> D
+    C[Dev.to Forem API<br/>5 tags] --> D
+    D --> E[Filter + Deduplicate]
+    E --> F[Fetch Comments<br/>HN + Dev.to]
+    F --> G[Embed PDFs<br/>base64 via OpenRouter]
+    G --> H{Synthesize}
+    H --> I[OpenRouter LLM<br/>DeepSeek V4 Flash]
+    I --> J[INSIGHTS.md<br/>updated daily]
+    J -.-> |next run| D
+
+    style H fill:#f9f,stroke:#333
+    style I fill:#bbf,stroke:#333
 ```
 
 All personalization (API keys, resume/CV paths) lives in gitignored files.
@@ -78,9 +78,10 @@ for your field:
 ```toml
 reddit_subreddits = ["jobsearch", "gradadmissions", "jobsearchhacks", "GetEmployed"]
 hn_queries = [
-  "resume OR CV OR career advice",
-  "job search OR interview OR hiring",
-  "salary negotiation OR compensation OR raise",
+  "resume", "career", "interview", "hiring", "salary",
+  "negotiation", "job search", "offer", "layoff",
+  "networking", "recruiter", "compensation",
+  "cover letter", "career advice", "job market",
 ]
 devto_tags = ["career", "webdev", "beginners", "productivity", "interview"]
 ```
@@ -146,8 +147,8 @@ and full self-text but does not include comment data.
 
 ## How It Works
 
-1. **Fetch** — Reddit RSS (4 subreddits, ~40 posts), HN Algolia (3 queries,
-   ~30 posts), Dev.to (5 tags, ~25 articles).
+1. **Fetch** — Reddit RSS (4 subreddits, ~40 posts), HN Algolia (15 keywords,
+   ~75 posts), Dev.to (5 tags, ~25 articles).
 2. **Filter** — Deduplicate against `data/seen.json` (last 3,000 post IDs).
 3. **Comment** — Fetch top comments for highest-scoring HN and Dev.to posts.
 4. **Embed** — Encode resume + CV PDFs as base64 and attach to the LLM request.

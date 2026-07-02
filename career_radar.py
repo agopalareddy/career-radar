@@ -10,9 +10,8 @@ actionable insights.
 Run daily via cron or a systemd timer. See README.md.
 """
 
-from __future__ import annotations
-
 import argparse
+import base64
 import datetime
 import json
 import os
@@ -45,20 +44,39 @@ Rules that govern every response:
   advice ("network more", "tailor your resume") is banned. Replace it with
   "Your Crittero internship taught you recommendation systems; emphasize that
   when applying to personalization teams at Spotify or Netflix."
-- Each section must contain at least one concrete, measurable action they can
-  take THIS WEEK. No "consider doing X" — write "Do X by Friday."
 - You are seeing raw, unfiltered posts from job seekers. Extract the
   PATTERNS behind the anecdotes: what are hiring managers actually looking
   for, what ATS systems are filtering on, what interview formats are
   changing. The individual posts are just data points — your job is to find
   the signal.
-- Write at length. The document should be 300-600 lines. Do not truncate.
-  Do not summarize. Go deep. Each section should have 4-8 substantive
-  bullet points with explanations, not one-liners.
-- Use their name. Address them directly. "Aadarsha, here's what you need to
-  change in your resume this week." Not generic third-person.
+- Write at length. 300-600 lines. Each section should have 4-8 substantive
+  bullet points with explanations.
+- Use their name. Address them directly.
 - The document should feel like a senior mentor wrote it after spending an
   hour studying their career and reading today's job market news.
+
+FORMAT RULES — follow this section structure EXACTLY on every run:
+- The document begins with a title: "# Career Insights for [name]"
+- Below the title, the subtitle: "_Maintained automatically by career-radar._"
+- Then these sections, in this order, with these exact headings:
+  ## Employment Market Reality
+  ## Grad School Reality
+  ## Resume Fit & Advice
+  ## CV Fit & Advice
+  ## Job Search Strategy & Tactics
+  ## Interview Preparation
+  ## Target Companies & Roles
+  ## Networking & Outreach
+  ## Negotiation & Market Signals
+  ## Mental Health & Resilience
+  ## Log
+- NEVER add deadlines or schedules. Do not say "by Monday", "this week",
+  "by Friday", "within 30 days", or assign dates. Describe actions without
+  timelines. Write "Update your resume's impact metrics" not "Update your
+  resume's impact metrics by Friday."
+- NEVER add an "Action Items" section, checklist, numbered task list, or
+  calendar. The sections above ARE the action items.
+- The Log section has one new dated line per run: "- YYYY-MM-DD: ..."
 
 Their professional profile:
 
@@ -221,8 +239,8 @@ def fetch_reddit_rss(subreddit: str, cfg: dict) -> list[dict]:
 def fetch_hn_posts(query: str, cfg: dict) -> list[dict]:
     import requests
 
-    hits = cfg.get("hn_hits_per_query", 10)
-    url = f"https://hn.algolia.com/api/v1/search?query={urllib.parse.quote(query)}&tags=story&hitsPerPage={hits}"
+    hits = cfg.get("hn_hits_per_query", 5)
+    url = f"https://hn.algolia.com/api/v1/search_by_date?query={urllib.parse.quote(query)}&tags=story&hitsPerPage={hits}"
     resp = requests.get(url, headers={"User-Agent": REDDIT_AGENT}, timeout=15)
     if resp.status_code != 200:
         return []
@@ -402,7 +420,6 @@ def gather_profile() -> tuple[str, list[Path]]:
 def synthesize(
     cfg: dict, profile: str, pdf_paths: list[Path], digest: str, current: str
 ) -> str:
-    import base64 as _base64
     import requests as _requests
 
     today = datetime.date.today().isoformat()
@@ -415,7 +432,7 @@ def synthesize(
     for pdf_path in pdf_paths:
         try:
             with open(pdf_path, "rb") as f:
-                b64 = _base64.b64encode(f.read()).decode()
+                b64 = base64.b64encode(f.read()).decode()
         except OSError as e:
             print(f"warning: could not read {pdf_path}: {e}", file=sys.stderr)
             continue
