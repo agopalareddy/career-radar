@@ -1,35 +1,54 @@
 # career-radar
 
-Automated daily career-advancement assistant. Every morning it:
+**Daily AI-powered career intelligence — personalized, private, free.**
 
-1. Pulls the day's top posts and comments from career-related subreddits
-   (job-search trends, CV/resume advice, interview strategies) — staying
-   comfortably inside Reddit's **free API tier**.
-2. Feeds that raw digest, plus your **locally-stored CV and personal
-   website**, to a budget LLM via OpenRouter (DeepSeek V4 Flash by default).
-3. Rewrites `data/INSIGHTS.md` — a living markdown document of actionable,
-   personalized insights that gets sharper every day.
-
-All personalization (API keys, CV path, website path) lives in gitignored
-local files (`.env`, `config.toml`). Nothing personal is ever committed, so
-the repo is safe to publish and fork.
+Every morning, `career-radar` gathers today's top career-related posts from
+Reddit, Hacker News, and Dev.to, grounds them against your locally-stored
+resume and CV, and has an LLM rewrite a living markdown document of
+actionable career insights tailored specifically to you.
 
 ```
-subreddits ──▶ career_radar.py ──▶ OpenRouter (DeepSeek V4 Flash)
-                    ▲                      │
-        .env / config.toml                 ▼
-        CV + website (local)      data/INSIGHTS.md (updated daily)
+┌──────────────────┐
+│ Reddit RSS (4 subs)  │──┐
+│ HN Algolia (3 queries)│──┤
+│ Dev.to (5 tags)       │──┤
+└──────────────────┘   │
+                       ▼
+              ┌────────────────┐      ┌─────────────┐
+              │ career_radar.py │─────▶│ OpenRouter   │
+              └────────────────┘      │ (DeepSeek)   │
+                       ▲               └──────┬──────┘
+         .env / config.toml                   │
+         Resume + CV (local PDFs)             ▼
+                                   data/INSIGHTS.md
+                                   (updated daily)
 ```
+
+All personalization (API keys, resume/CV paths) lives in gitignored files.
+Nothing personal is ever committed — the repo is safe to fork and publish.
+
+## Features
+
+- **Three free data sources** — Reddit RSS (no auth), Hacker News Algolia API,
+  Dev.to Forem API. Zero API keys required for data collection.
+- **PDF-native parsing** — Resumes and CVs sent directly to the LLM via
+  OpenRouter's file support. No `pdftotext` needed.
+- **Comment extraction** — Comments fetched for HN and Dev.to posts for deeper
+  signal.
+- **Incremental updates** — Each run passes the previous `INSIGHTS.md` back to
+  the model so it merges, updates, and drops stale advice.
+- **Deduplication** — Post IDs tracked in `data/seen.json`; nothing processed
+  twice.
+- **~$0.01/day** — Default model is `deepseek/deepseek-v4-flash` via OpenRouter
+  ($0.09/M input, $0.18/M output).
 
 ## Requirements
 
-- Python 3.11+ (uses stdlib `tomllib`)
-- A free Reddit API app (script type)
-- An [OpenRouter API key](https://openrouter.ai/keys)
-- Optional: `poppler-utils` (`pdftotext`) if your CV is a PDF —
-  `sudo apt install poppler-utils` / `brew install poppler`
+- Python 3.11+
+- An [OpenRouter API key](https://openrouter.ai/keys) (free to create)
+- No Reddit API app needed — uses public RSS feeds
 
-## Setup
+## Quick Start
 
 ```bash
 git clone https://github.com/agopalareddy/career-radar
@@ -38,39 +57,48 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 1. Create a Reddit app (free)
-
-1. Go to <https://www.reddit.com/prefs/apps> → "create another app…"
-2. Type: **script**. Name: `career-radar`. Redirect URI: `http://localhost:8080` (unused).
-3. Note the client ID (under the app name) and the secret.
-
-### 2. Configure
+### Configure
 
 ```bash
-cp .env.example .env            # secrets + local paths — edit it
-cp config.example.toml config.toml   # subreddits + model — edit it
+cp .env.example .env                  # add your OpenRouter key + resume/CV paths
+cp config.example.toml config.toml    # tune subreddits, HN queries, Dev.to tags
 ```
 
-- `.env` holds credentials and the **absolute paths** to your CV and (optionally)
-  a folder with your personal-website source. These files stay wherever they
-  already live on your machine; the tool only reads them.
-- `config.toml` holds the subreddit list, the model, and request limits.
-  Tailor the subreddits to your field.
-
-### 3. Test
+**`.env`** — add your OpenRouter key and absolute paths to your resume and CV
+(PDFs preferred, `.tex` and `.md` also supported):
 
 ```bash
-python3 test_career_radar.py        # offline self-checks
-python3 career_radar.py --dry-run   # fetch Reddit, print digest, no LLM call
-python3 career_radar.py             # full run — writes data/INSIGHTS.md
+OPENROUTER_API_KEY=sk-or-v1-...
+CV_PATH=/path/to/resume.pdf,/path/to/cv.pdf
+```
+
+**`config.toml`** — customize subreddits, HN search queries, and Dev.to tags
+for your field:
+
+```toml
+reddit_subreddits = ["jobsearch", "gradadmissions", "jobsearchhacks", "GetEmployed"]
+hn_queries = [
+  "resume OR CV OR career advice",
+  "job search OR interview OR hiring",
+  "salary negotiation OR compensation OR raise",
+]
+devto_tags = ["career", "webdev", "beginners", "productivity", "interview"]
+```
+
+### Run
+
+```bash
+python3 test_career_radar.py           # 4 offline self-checks (no deps)
+python3 career_radar.py --dry-run      # fetch + print digest, skip LLM
+python3 career_radar.py                # full run → data/INSIGHTS.md
 ```
 
 ## Scheduling
 
-### cron
+### cron (recommended)
 
 ```cron
-15 8 * * * cd /path/to/career-radar && .venv/bin/python career_radar.py >> data/run.log 2>&1
+0 8 * * * cd /path/to/career-radar && .venv/bin/python career_radar.py >> data/run.log 2>&1
 ```
 
 ### systemd user timer
@@ -105,36 +133,50 @@ WantedBy=timers.target
 systemctl --user enable --now career-radar.timer
 ```
 
-> GitHub Actions is deliberately **not** the suggested runner: the whole point
-> is grounding against files on your machine that never leave it.
+## Data Sources
 
-## Costs and rate limits
+| Source      | Method                        | Auth | Comments                     |
+| ----------- | ----------------------------- | ---- | ---------------------------- |
+| Reddit      | Public RSS feeds (`/top.rss`) | None | Posts only                   |
+| Hacker News | Algolia Search API            | None | Posts + comment trees        |
+| Dev.to      | Forem API v0                  | None | Articles + threaded comments |
 
-- **Reddit**: free tier allows 100 requests/minute per OAuth client. Default
-  config makes ~33 requests per run, spaced 1s apart, once a day.
-- **LLM**: default model `deepseek/deepseek-v4-flash` via OpenRouter
-  ($0.09 in / $0.18 out per million tokens). A typical run sends ~30–60K
-  input tokens and gets a few thousand back — **well under a cent per day**.
-  Any OpenRouter model id works in `config.toml` (`deepseek/deepseek-v4-pro`,
-  `anthropic/claude-haiku-4.5`, ...) for deeper analysis at higher cost.
+Comments are extracted for HN and Dev.to. Reddit RSS provides post titles
+and full self-text but does not include comment data.
 
-## How the insights doc evolves
+## How It Works
 
-Each run passes the current `data/INSIGHTS.md` back to the model along with
-the day's digest and your profile, and asks it to merge — updating sections,
-dropping stale advice, and appending one dated line to a `## Log` section.
-Post IDs are tracked in `data/seen.json` so nothing is processed twice. If a
-run fails, the previous document is left untouched.
+1. **Fetch** — Reddit RSS (4 subreddits, ~40 posts), HN Algolia (3 queries,
+   ~30 posts), Dev.to (5 tags, ~25 articles).
+2. **Filter** — Deduplicate against `data/seen.json` (last 3,000 post IDs).
+3. **Comment** — Fetch top comments for highest-scoring HN and Dev.to posts.
+4. **Embed** — Encode resume + CV PDFs as base64 and attach to the LLM request.
+5. **Synthesize** — Send the full digest + profile + previous INSIGHTS.md to
+   OpenRouter. The LLM rewrites the entire document — merging new findings,
+   updating stale sections, and logging changes.
+6. **Save** — Write updated `data/INSIGHTS.md` and `data/seen.json`.
 
 ## Files
 
-| File | Committed? | Purpose |
-|---|---|---|
-| `career_radar.py` | ✅ | the whole pipeline |
-| `config.example.toml` / `.env.example` | ✅ | templates |
-| `test_career_radar.py` | ✅ | offline self-checks |
-| `config.toml` / `.env` | ❌ gitignored | your personalization |
-| `data/` | ❌ gitignored | insights doc, seen-post state, logs |
+| File                   | Committed     | Purpose                            |
+| ---------------------- | ------------- | ---------------------------------- |
+| `career_radar.py`      | ✅            | Multi-source pipeline (~550 lines) |
+| `config.example.toml`  | ✅            | Config template                    |
+| `.env.example`         | ✅            | Env template                       |
+| `test_career_radar.py` | ✅            | 4 offline self-checks              |
+| `config.toml` / `.env` | ❌ gitignored | Your personalization               |
+| `data/`                | ❌ gitignored | INSIGHTS.md, seen.json, logs       |
+
+## Contributing
+
+Bug reports and feature requests welcome via GitHub Issues. PRs should keep
+the dependency footprint minimal — the only runtime dependency is `requests`.
+
+1. Fork the repo
+2. Create a feature branch (`git checkout -b feat/amazing-feature`)
+3. Run tests (`python3 test_career_radar.py`)
+4. Run a dry-run (`python3 career_radar.py --dry-run`)
+5. Open a PR
 
 ## License
 
