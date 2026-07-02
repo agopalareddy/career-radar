@@ -19,9 +19,10 @@ import re
 import subprocess
 import sys
 import time
-import tomllib
 import urllib.parse
 from pathlib import Path
+
+import tomllib
 
 ROOT = Path(__file__).resolve().parent
 SEEN_PATH = ROOT / "data" / "seen.json"
@@ -82,11 +83,25 @@ FORMAT RULES — follow this section structure EXACTLY on every run:
   The source counts (RR, HH, DD) are provided in the digest
   under 'Source Summary' at the end of the digest.
 
-Their professional profile:
+Their professional profile (including their industry Resume and academic CV):
 
 <profile>
 {profile}
 </profile>
+
+CRITICAL DISTINCTION — their documents are labeled:
+- **Resume (Industry)** = for industry job applications (tech companies,
+  startups, corporate roles). One page, focused on work experience and
+  impact.
+- **CV (Academic)** = for academic/research positions ONLY (PhD programs,
+  postdocs, faculty roles, research grants). Multi-page, includes
+  publications, teaching, service, honors.
+
+Never suggest repurposing their academic CV for industry — they already
+have a separate Resume for that. The "## Resume Fit & Advice" section
+covers industry positioning. The "## CV Fit & Advice" section covers
+academic/research positioning (PhD applications, conferences, publications,
+research statements).
 """
 
 USER_PROMPT = """\
@@ -407,17 +422,18 @@ def extract_text(path: Path) -> str:
     return path.read_text(errors="ignore")
 
 
-def gather_profile() -> tuple[str, list[Path]]:
+def gather_profile() -> tuple[str, list[tuple[str, Path]]]:
     parts: list[str] = []
-    pdf_paths: list[Path] = []
+    pdf_paths: list[tuple[str, Path]] = []
     for cv_raw in os.environ.get("CV_PATH", "").split(","):
         cv_path = Path(cv_raw.strip())
         if cv_raw.strip() and cv_path.exists() and cv_path.is_file():
+            name_lower = cv_path.name.lower()
+            label = "Resume (Industry)" if "resume" in name_lower else "CV (Academic)"
             if cv_path.suffix.lower() == ".pdf":
-                pdf_paths.append(cv_path)
+                pdf_paths.append((label, cv_path))
             else:
-                label = "## Resume" if "resume" in cv_path.name.lower() else "## CV"
-                parts.append(f"{label}\n" + extract_text(cv_path))
+                parts.append(f"## {label}\n" + extract_text(cv_path))
     site = os.environ.get("WEBSITE_DIR", "")
     if site and Path(site).is_dir():
         for f in sorted(Path(site).rglob("*")):
@@ -438,7 +454,7 @@ def gather_profile() -> tuple[str, list[Path]]:
 
 
 def synthesize(
-    cfg: dict, profile: str, pdf_paths: list[Path], digest: str, current: str
+    cfg: dict, profile: str, pdf_paths: list[tuple[str, Path]], digest: str, current: str
 ) -> str:
     import requests as _requests
 
@@ -449,7 +465,7 @@ def synthesize(
             "text": USER_PROMPT.format(current=current, digest=digest, today=today),
         }
     ]
-    for pdf_path in pdf_paths:
+    for label, pdf_path in pdf_paths:
         try:
             with open(pdf_path, "rb") as f:
                 b64 = base64.b64encode(f.read()).decode()
@@ -457,12 +473,15 @@ def synthesize(
             print(f"warning: could not read {pdf_path}: {e}", file=sys.stderr)
             continue
         user_content.append(
+            {"type": "text", "text": f"## {label}\n"}
+        )
+        user_content.append(
             {
                 "type": "file",
                 "file": {"file_data": f"data:application/pdf;base64,{b64}"},
             }
         )
-        print(f"embedded {pdf_path.name} ({len(b64) // 1024} KB base64)")
+        print(f"embedded {label}: {pdf_path.name} ({len(b64) // 1024} KB base64)")
 
     resp = _requests.post(
         "https://openrouter.ai/api/v1/chat/completions",
