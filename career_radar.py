@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Career Radar — daily Reddit career intel, synthesized by Claude.
+"""Career Radar — daily Reddit career intel, synthesized by an LLM.
 
 Pulls top posts and comments from career-related subreddits (well within
 Reddit's free API tier), grounds them against a locally-stored CV / personal
-website (never committed to the repo), and has Claude rewrite a living
-markdown document of actionable insights.
+website (never committed to the repo), and has an OpenRouter-hosted model
+(DeepSeek V4 Flash by default) rewrite a living markdown document of
+actionable insights.
 
 Run daily via cron or a systemd timer. See README.md.
 """
@@ -230,20 +231,25 @@ def gather_profile() -> str:
 # ---------- synthesis ----------
 
 def synthesize(cfg: dict, profile: str, digest: str, current: str) -> str:
-    from anthropic import Anthropic  # lazy import, see reddit_session
+    import requests  # lazy import, see reddit_session
 
-    client = Anthropic()  # reads ANTHROPIC_API_KEY from env
     today = datetime.date.today().isoformat()
-    resp = client.messages.create(
-        model=cfg["model"],
-        max_tokens=cfg["max_output_tokens"],
-        system=SYSTEM_PROMPT.format(profile=profile),
-        messages=[{
-            "role": "user",
-            "content": USER_PROMPT.format(current=current, digest=digest, today=today),
-        }],
+    resp = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={"Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}"},
+        json={
+            "model": cfg["model"],
+            "max_tokens": cfg["max_output_tokens"],
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT.format(profile=profile)},
+                {"role": "user",
+                 "content": USER_PROMPT.format(current=current, digest=digest, today=today)},
+            ],
+        },
+        timeout=300,
     )
-    text = "".join(b.text for b in resp.content if b.type == "text").strip()
+    resp.raise_for_status()
+    text = resp.json()["choices"][0]["message"]["content"].strip()
     if len(text) < 100:
         sys.exit(f"model returned suspiciously short output; not overwriting insights:\n{text}")
     return text + "\n"
@@ -261,7 +267,7 @@ def main() -> None:
     cfg = load_config()
     require_env("REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET")
     if not args.dry_run:
-        require_env("ANTHROPIC_API_KEY")
+        require_env("OPENROUTER_API_KEY")
 
     seen = json.loads(SEEN_PATH.read_text()) if SEEN_PATH.exists() else []
     user_agent = os.environ.get("REDDIT_USER_AGENT", "career-radar/1.0")

@@ -1,9 +1,10 @@
 # Copy to config.toml and edit. config.toml is gitignored — safe to personalize.
 
-# Anthropic model for synthesis. claude-haiku-4-5 is the budget pick
-# ($1/$5 per million tokens; a typical daily run costs a few cents).
-# Swap for "claude-sonnet-5" or "claude-opus-4-8" if you want deeper analysis.
-model = "claude-haiku-4-5"
+# OpenRouter model for synthesis. deepseek-v4-flash is the budget pick
+# ($0.09/$0.18 per million tokens; a daily run costs a fraction of a cent).
+# Any OpenRouter model id works, e.g. "deepseek/deepseek-v4-pro" or
+# "anthropic/claude-haiku-4.5" for deeper analysis.
+model = "deepseek/deepseek-v4-flash"
 max_output_tokens = 8192
 
 # Where the living insights document is written (gitignored by default).

@@ -6,7 +6,7 @@ Automated daily career-advancement assistant. Every morning it:
    (job-search trends, CV/resume advice, interview strategies) — staying
    comfortably inside Reddit's **free API tier**.
 2. Feeds that raw digest, plus your **locally-stored CV and personal
-   website**, to a budget-friendly Claude model.
+   website**, to a budget LLM via OpenRouter (DeepSeek V4 Flash by default).
 3. Rewrites `data/INSIGHTS.md` — a living markdown document of actionable,
    personalized insights that gets sharper every day.
 
@@ -15,7 +15,7 @@ local files (`.env`, `config.toml`). Nothing personal is ever committed, so
 the repo is safe to publish and fork.
 
 ```
-subreddits ──▶ career_radar.py ──▶ Claude (Haiku by default)
+subreddits ──▶ career_radar.py ──▶ OpenRouter (DeepSeek V4 Flash)
                     ▲                      │
         .env / config.toml                 ▼
         CV + website (local)      data/INSIGHTS.md (updated daily)
@@ -25,7 +25,7 @@ subreddits ──▶ career_radar.py ──▶ Claude (Haiku by default)
 
 - Python 3.11+ (uses stdlib `tomllib`)
 - A free Reddit API app (script type)
-- An [Anthropic API key](https://console.anthropic.com/)
+- An [OpenRouter API key](https://openrouter.ai/keys)
 - Optional: `poppler-utils` (`pdftotext`) if your CV is a PDF —
   `sudo apt install poppler-utils` / `brew install poppler`
 
@@ -112,11 +112,11 @@ systemctl --user enable --now career-radar.timer
 
 - **Reddit**: free tier allows 100 requests/minute per OAuth client. Default
   config makes ~33 requests per run, spaced 1s apart, once a day.
-- **Anthropic**: default model `claude-haiku-4-5` ($1 in / $5 out per million
-  tokens). A typical run sends ~30–60K input tokens and gets a few thousand
-  back — roughly **$0.03–0.08/day (~$1–2/month)**. Set `model` in
-  `config.toml` to `claude-sonnet-5` or `claude-opus-4-8` for deeper analysis
-  at higher cost.
+- **LLM**: default model `deepseek/deepseek-v4-flash` via OpenRouter
+  ($0.09 in / $0.18 out per million tokens). A typical run sends ~30–60K
+  input tokens and gets a few thousand back — **well under a cent per day**.
+  Any OpenRouter model id works in `config.toml` (`deepseek/deepseek-v4-pro`,
+  `anthropic/claude-haiku-4.5`, ...) for deeper analysis at higher cost.
 
 ## How the insights doc evolves
 
