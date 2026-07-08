@@ -72,6 +72,10 @@ FORMAT RULES — follow this section structure EXACTLY on every run:
   ## Negotiation & Market Signals
   ## Mental Health & Resilience
   ## Log
+- ALL 11 sections MUST appear. Dropping a section is more harmful than
+  shortening its content. If you are running out of output space, reduce
+  each section to 2-3 tightly focused bullet points — never omit a section
+  entirely.
 - NEVER add deadlines or schedules. Do not say "by Monday", "this week",
   "by Friday", "within 30 days", or assign dates. Describe actions without
   timelines. Write "Update your resume's impact metrics" not "Update your
@@ -126,6 +130,8 @@ Rewrite the ENTIRE insights document. Rules:
 - Keep a "## Log" section at the bottom; add one dated line ({today})
   summarizing what changed today.
 - Keep the whole document under ~600 lines.
+- CRITICAL: All 11 sections must be present in the final output. A section
+  with 2 short bullets is acceptable — a missing section is not.
 - Output ONLY the markdown document. No preamble, no code fences around it.
 
 <current_document>
@@ -250,6 +256,12 @@ def fetch_reddit_rss(subreddit: str, cfg: dict) -> list[dict]:
         post_id = eid.text.removeprefix("t3_") if eid is not None and eid.text else ""
         title = title_el.text if title_el is not None else ""
         raw_body = content_el.text if content_el is not None else ""
+        # ponytail: extract comment count from Reddit RSS footer "[N comments]"
+        nc_match = re.search(r"\[(\d+)\s+comments?\]", raw_body) if raw_body else None
+        try:
+            num_comments = int(nc_match.group(1)) if nc_match else 0
+        except (ValueError, TypeError):
+            num_comments = 0
         selftext = _html_to_text(raw_body)[:POST_TEXT_CAP]
         if post_id and title:
             posts.append(
@@ -259,7 +271,7 @@ def fetch_reddit_rss(subreddit: str, cfg: dict) -> list[dict]:
                     "title": title,
                     "selftext": selftext,
                     "score": 0,
-                    "num_comments": 0,
+                    "num_comments": num_comments,
                     "comments": [],
                 }
             )
@@ -381,6 +393,11 @@ def filter_new_posts(posts: list[dict], seen: list[str]) -> list[dict]:
     return [p for p in posts if p["id"] not in seen_set]
 
 
+def filter_active_posts(posts: list[dict], min_messages: int) -> list[dict]:
+    """Keep posts with num_comments >= min_messages. Below-threshold posts stay unseen."""
+    return [p for p in posts if p["num_comments"] >= min_messages]
+
+
 def build_digest(posts: list[dict]) -> str:
     lines = []
     for p in posts:
@@ -453,8 +470,46 @@ def gather_profile() -> tuple[str, list[tuple[str, Path]]]:
 # ---------- synthesis ----------
 
 
+# Synthesis retry guardrails — prevent runaway spend on truncated outputs.
+_MAX_RETRIES = 1  # retry at most once after a length-truncated generation
+_MAX_OUTPUT_TOKENS_HARD = 131072  # never exceed this even on retry (DeepSeek cap)
+
+# Sections that MUST appear in every output (validated post-generation).
+_REQUIRED_SECTIONS = [
+    "## Employment Market Reality",
+    "## Grad School Reality",
+    "## Resume Fit & Advice",
+    "## CV Fit & Advice",
+    "## Job Search Strategy & Tactics",
+    "## Interview Preparation",
+    "## Target Companies & Roles",
+    "## Networking & Outreach",
+    "## Negotiation & Market Signals",
+    "## Mental Health & Resilience",
+    "## Log",
+]
+
+
+def _validate_output(text: str, today: str) -> list[str]:
+    """Return list of problems (empty = valid). Checks section presence and Log date."""
+    problems: list[str] = []
+    missing = [s for s in _REQUIRED_SECTIONS if s not in text]
+    if missing:
+        problems.append(f"missing sections: {', '.join(missing)}")
+    log_prefix = f"- {today}:"
+    if "## Log" in text and log_prefix not in text:
+        problems.append(f"Log section present but missing today's date ({today})")
+    if not text.startswith("# Career Insights for"):
+        problems.append("missing or malformed title line")
+    return problems
+
+
 def synthesize(
-    cfg: dict, profile: str, pdf_paths: list[tuple[str, Path]], digest: str, current: str
+    cfg: dict,
+    profile: str,
+    pdf_paths: list[tuple[str, Path]],
+    digest: str,
+    current: str,
 ) -> str:
     import requests as _requests
 
@@ -472,9 +527,7 @@ def synthesize(
         except OSError as e:
             print(f"warning: could not read {pdf_path}: {e}", file=sys.stderr)
             continue
-        user_content.append(
-            {"type": "text", "text": f"## {label}\n"}
-        )
+        user_content.append({"type": "text", "text": f"## {label}\n"})
         user_content.append(
             {
                 "type": "file",
@@ -483,25 +536,94 @@ def synthesize(
         )
         print(f"embedded {label}: {pdf_path.name} ({len(b64) // 1024} KB base64)")
 
+    payload = {
+        "model": cfg["model"],
+        "max_tokens": cfg["max_output_tokens"],
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT.format(profile=profile)},
+            {"role": "user", "content": user_content},
+        ],
+    }
     resp = _requests.post(
         "https://openrouter.ai/api/v1/chat/completions",
         headers={"Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}"},
-        json={
-            "model": cfg["model"],
-            "max_tokens": cfg["max_output_tokens"],
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT.format(profile=profile)},
-                {"role": "user", "content": user_content},
-            ],
-        },
+        json=payload,
         timeout=300,
     )
     resp.raise_for_status()
-    text = resp.json()["choices"][0]["message"]["content"].strip()
+    body = resp.json()
+    choice = body["choices"][0]
+    text = choice["message"]["content"].strip()
+    finish = choice.get("finish_reason", "unknown")
+
+    if finish == "length":
+        print(
+            f"warning: model stopped early (finish_reason=length) — "
+            f"output likely truncated at {cfg['max_output_tokens']} tokens",
+            file=sys.stderr,
+        )
+
     if len(text) < 100:
         sys.exit(
             f"model returned suspiciously short output; not overwriting insights:\n{text}"
         )
+
+    problems = _validate_output(text, today)
+    if problems:
+        print(
+            f"warning: output validation found {len(problems)} issue(s):",
+            file=sys.stderr,
+        )
+        for p in problems:
+            print(f"  - {p}", file=sys.stderr)
+    # Retry capped: only if length-truncated, only if sections are missing,
+    # only up to _MAX_RETRIES, and token budget never exceeds hard cap.
+    retries = 0
+    while (
+        finish == "length"
+        and any("missing sections" in p for p in problems)
+        and retries < _MAX_RETRIES
+    ):
+        next_tokens = min(payload["max_tokens"] * 2, _MAX_OUTPUT_TOKENS_HARD)
+        if next_tokens <= payload["max_tokens"]:
+            print(
+                "warning: already at hard token cap, cannot retry",
+                file=sys.stderr,
+            )
+            break
+        retries += 1
+        print(
+            f"retry {retries}/{_MAX_RETRIES}: max_tokens={next_tokens} "
+            f"(was {payload['max_tokens']})",
+            file=sys.stderr,
+        )
+        payload["max_tokens"] = next_tokens
+        resp = _requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}"},
+            json=payload,
+            timeout=300,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        choice = body["choices"][0]
+        text = choice["message"]["content"].strip()
+        finish = choice.get("finish_reason", "unknown")
+        problems = _validate_output(text, today)
+        if finish == "length":
+            print(
+                "warning: model still truncated on retry — "
+                "consider increasing max_output_tokens further",
+                file=sys.stderr,
+            )
+        if problems:
+            print(
+                f"warning: retry still has {len(problems)} issue(s):",
+                file=sys.stderr,
+            )
+            for p in problems:
+                print(f"  - {p}", file=sys.stderr)
+
     return text + "\n"
 
 
@@ -590,7 +712,28 @@ def main() -> None:
         print("no new posts today; nothing to do")
         return
 
-    digest = build_digest(new_posts)
+    min_msgs = cfg.get("min_messages", 25)
+    active_posts = filter_active_posts(new_posts, min_msgs)
+    skipped = len(new_posts) - len(active_posts)
+    if skipped:
+        print(
+            f"skipped {skipped} post(s) below {min_msgs}-message threshold "
+            f"(left unseen for future runs)"
+        )
+
+    if not active_posts:
+        print(f"no active posts above {min_msgs}-message threshold; nothing to do")
+        return
+
+    min_posts = cfg.get("min_posts_to_synthesize", 8)
+    if len(active_posts) < min_posts:
+        print(
+            f"only {len(active_posts)} active post(s) — need {min_posts} "
+            f"to justify LLM call; skipping synthesis"
+        )
+        return
+
+    digest = build_digest(active_posts)
     digest += (
         f"\n\n<!-- Source Summary for Log -->\n"
         f"## Source Summary\n"
@@ -613,7 +756,7 @@ def main() -> None:
     insights_path.parent.mkdir(parents=True, exist_ok=True)
     insights_path.write_text(updated)
     SEEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-    SEEN_PATH.write_text(json.dumps(update_seen(seen, new_posts)))
+    SEEN_PATH.write_text(json.dumps(update_seen(seen, active_posts)))
     print(f"updated {insights_path}")
 
 

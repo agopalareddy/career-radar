@@ -5,14 +5,24 @@
 # Any OpenRouter model id works, e.g. "deepseek/deepseek-v4-pro" or
 # "anthropic/claude-haiku-4.5" for deeper analysis.
 model = "deepseek/deepseek-v4-flash"
-max_output_tokens = 8192
+# Prompt asks for 300-600 lines — 8K tokens is too low, the doc gets truncated.
+# 32K gives headroom for all sections with substantive bullet points.
+max_output_tokens = 32768
 
 # Where the living insights document is written (gitignored by default).
 insights_path = "data/INSIGHTS.md"
 
+# Minimum total messages (comments/replies) a post must have to be included.
+# Posts below this threshold stay unseen — a future run picks them up once
+# they accumulate more activity.
+min_messages = 25
+
+# Minimum number of active posts (above min_messages) needed to run an LLM
+# synthesis. Below this, the run skips — cheap days don't waste tokens.
+min_posts_to_synthesize = 8
+
 # ── Reddit RSS (posts only via public RSS feeds, no auth) ──
 # Reddit rate-limits RSS to ~1 req/60s. 10s delay between calls.
-# No comments available via RSS — comments come from HN + Dev.to.
 reddit_subreddits = [
   "jobsearch",
   "gradadmissions",

@@ -4,7 +4,35 @@ import os
 import tempfile
 from pathlib import Path
 
-from career_radar import SEEN_CAP, build_digest, filter_new_posts, load_env, update_seen
+from career_radar import (
+    SEEN_CAP,
+    _REQUIRED_SECTIONS,
+    _validate_output,
+    build_digest,
+    filter_new_posts,
+    load_env,
+    update_seen,
+)
+
+
+def test_validate_output_accepts_complete():
+    """Valid full document with all sections and today's Log entry."""
+    sections = "\n\n".join(_REQUIRED_SECTIONS)
+    doc = f"# Career Insights for Aadarsha\n\n_Maintained automatically._\n\n{sections}\n\n- 2026-07-08: 111 total posts (40 Reddit, 46 Hacker News, 25 Dev.to). Updated."
+    assert _validate_output(doc, "2026-07-08") == []
+
+
+def test_validate_output_rejects_missing_sections():
+    doc = "# Career Insights for Aadarsha\n\n- 2026-07-08: test."
+    problems = _validate_output(doc, "2026-07-08")
+    assert len(problems) >= 1
+    assert any("missing sections" in p for p in problems)
+
+
+def test_validate_output_rejects_missing_log_date():
+    doc = f"# Career Insights for Aadarsha\n\n{chr(10).join(_REQUIRED_SECTIONS)}\n\n- 2026-07-07: old entry."
+    problems = _validate_output(doc, "2026-07-08")
+    assert any("Log" in p for p in problems)
 
 
 def test_filter_new_posts():
